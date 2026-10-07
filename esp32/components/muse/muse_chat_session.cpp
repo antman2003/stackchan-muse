@@ -69,6 +69,7 @@ extern "C" {
 #include "muse_account_api.h"
 #include "muse_link.h"
 #include "muse_settings.h"
+#include "muse_speak.h"
 #include "muse_wifi.h"
 }
 #include "muse_chat_priv.h"
@@ -236,6 +237,7 @@ struct turn_t {
     /* TTS */
     int tts_msg;             /* message being fetched (or shown, speaker off), or -1 */
     bool silent;             /* speaker off: tts_msg is paced by silence, not fetched */
+    bool onboard;            /* this message is being spoken on the chip */
     uint8_t *mp3;            /* MP3_BUF */
     size_t mp3_len;
     bool mp3_ended;
@@ -956,6 +958,7 @@ static void turn_finish(void)
     s_turn.dict_id = s_turn.chat_id = 0;
     s_turn.tts_msg = -1;
     s_turn.silent = false;
+    s_turn.onboard = false;
     s_turn.mp3_len = 0;
 }
 
@@ -1517,11 +1520,24 @@ static void start_tts(void)
          * end. decode() plays it at the speaker's volume, captions following,
          * and finishes the message once it's drained.
          */
+        const char *said = s_turn.texts ? s_turn.texts + i * TEXT_MAX : nullptr;
+        if (said && said[0] && muse_speak_begin(said)) {
+            m.pcm_start = s_turn.pcm_out;
+            m.pcm_frames = 0;
+            m.tts = TTS_ACTIVE;
+            s_turn.tts_msg = i;
+            s_turn.silent = false;
+            s_turn.onboard = true;
+            ESP_LOGI(TAG, "speaking message %s (%u chars)", m.id, (unsigned)m.len);
+            show_reply_start(m);
+            return;
+        }
         m.pcm_start = s_turn.pcm_out;
         m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
         m.tts = TTS_ACTIVE;
         s_turn.tts_msg = i;
         s_turn.silent = true;
+        s_turn.onboard = false;
         ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
         show_reply_start(m);
         return;
@@ -1573,9 +1589,33 @@ static void pace_silently(void)
 }
 
 /* Decodes buffered MP3 while the reply buffer has room. */
+static void speak_onboard(void)
+{
+    msg_t &m = s_turn.msgs[s_turn.tts_msg];
+    while (xStreamBufferSpacesAvailable(s_out) >= 512 * sizeof(int16_t)) {
+        int n = muse_speak_take(s_pcm16, 512);
+        if (n <= 0) {
+            m.pcm_frames = s_turn.pcm_out - m.pcm_start;
+            m.tts = TTS_FINISHED;
+            s_turn.tts_msg = -1;
+            s_turn.onboard = false;
+            ESP_LOGI(TAG, "spoke %.1fs", m.pcm_frames / (double)MIC_RATE);
+            return;
+        }
+        if (s_turn.gen == s_gen.load()) {
+            xStreamBufferSend(s_out, s_pcm16, (size_t)n * sizeof(int16_t), 0);
+        }
+        s_turn.pcm_out += (uint32_t)n;
+    }
+}
+
 static void decode(void)
 {
     if (s_turn.tts_msg < 0) {
+        return;
+    }
+    if (s_turn.onboard) {
+        speak_onboard();
         return;
     }
     if (s_turn.silent) {

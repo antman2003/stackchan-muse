@@ -17,6 +17,7 @@ build/
 build-*/
 sdkconfig
 sdkconfig.old
+sdkconfig.token
 managed_components/
 dependencies.lock
 .cache/

@@ -48,3 +48,7 @@ esp_err_t muse_input_start(QueueHandle_t queue);
 
 /* Plays the goodbye animation and powers off (from the input task). */
 void muse_input_request_power_off(void);
+
+/* OR in MUSE_BTN_TALK_PRESS / MUSE_BTN_TALK_RELEASE from another task.
+ * The input task consumes them on its next poll. Both bits may be set. */
+void muse_input_touch_edges(unsigned edges);

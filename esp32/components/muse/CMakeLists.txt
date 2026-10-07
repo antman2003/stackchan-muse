@@ -43,7 +43,7 @@ if(CONFIG_MUSE_ENABLED)
         "muse_link.c"
         "muse_ble.c")
     if(CONFIG_MUSE_HATCH)
-        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp")
+        list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp" "muse_speak.c")
         list(APPEND embed "test_reply.mp3")   # muse_hatch_mp3_selftest
     else()
         list(APPEND srcs "muse_chat_link.c")   # text replies over Link's session
@@ -87,12 +87,12 @@ if(CONFIG_MUSE_ENABLED)
 elseif(CONFIG_HOMEHUB_VOICE)
     # The Voice PE board uses just the Hatch voice session; the project's main/
     # voice_muse_chat.c stands in for the Muse settings, Wi-Fi and Link hooks.
-    list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp" "muse_chat_text.c" "muse_text.c")
+    list(APPEND srcs "muse_chat.c" "muse_account_api.c" "muse_chat_session.cpp" "muse_speak.c" "muse_chat_text.c" "muse_text.c")
     list(APPEND embed "test_reply.mp3")
 endif()
 
 set(muse_priv_requires
-    esp_timer esp_driver_usb_serial_jtag esp_psram nvs_flash
+    esp_timer esp_driver_usb_serial_jtag esp_psram nvs_flash esp_partition
     bt esp-tls mbedtls esp_app_format esp_http_client
     noise_core minimp3
     esp_lcd esp_adc esp_driver_i2s esp_driver_ledc esp_driver_spi esp_driver_uart esp_wifi
@@ -107,6 +107,16 @@ idf_component_register(
     REQUIRES esp_driver_gpio esp_driver_i2c
     PRIV_REQUIRES ${muse_priv_requires}
 )
+
+if(CONFIG_MUSE_BOARD_M5STACK_CORES3)
+    # Espressif esp-tts, Apache-2.0. Sits next to this SDK, under stack_chan_muse.
+    # The voice file is flashed separately.
+    set(ESP_TTS_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../esp-tts")
+    target_include_directories(${COMPONENT_LIB} PRIVATE "${ESP_TTS_DIR}/include")
+    target_link_libraries(${COMPONENT_LIB} PUBLIC
+        "${ESP_TTS_DIR}/libesp_tts_chinese.a"
+        "${ESP_TTS_DIR}/libvoice_set_xiaole.a")
+endif()
 
 if(CONFIG_MUSE_ENABLED)
     # LVGL spins forever on a failed assert unless LV_ASSERT_HANDLER is set,

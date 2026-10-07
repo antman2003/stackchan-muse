@@ -35,6 +35,7 @@
 #include "muse_board.h"
 #include "muse_chat.h"
 #include "muse_console.h"
+#include "muse_input.h"
 #include "muse_link.h"
 #include "muse_mem.h"
 #include "muse_menu.h"
@@ -436,9 +437,137 @@ static void build_button_icons(lv_obj_t *face)
     lv_obj_align(s_aux_icon, a->align, a->x, a->y);
 }
 
+/* Hold anywhere on the face to talk. A short tap still pets; a drag still
+ * swipes to settings. The waking touch and the speaker button are left alone. */
+#define HOLD_TALK_MS 450
+#define HOLD_MOVE_PX 28
+#define TAP_MOVE_PX 40
+#define HOLD_SETTLE_MS 40   /* first sample is often a spike; lock the origin after this */
+#define HOLD_GAP_MS 100     /* a dropped sample must not restart the half-second */
+#define SWIPE_PX 36         /* a real slide toward settings, not a one-pixel leftover */
+
+static bool s_hold_down;
+static bool s_hold_track;
+static bool s_hold_moved;
+static bool s_hold_talking;
+static bool s_hold_settled;
+static lv_point_t s_hold_origin;
+static lv_point_t s_hold_point;
+static uint32_t s_hold_at;
+static uint32_t s_hold_raw_at;
+static uint32_t s_pet_at;
+
+static bool obj_within(lv_obj_t *obj, lv_obj_t *parent)
+{
+    while (obj) {
+        if (obj == parent) {
+            return true;
+        }
+        obj = lv_obj_get_parent(obj);
+    }
+    return false;
+}
+
+/* On the face, including a pixel or two of leftover scroll. A real swipe is
+ * SWIPE_PX, which is past the point where a hold would already have given up. */
+static bool face_settled(void)
+{
+    if (!s_tv) {
+        return true;
+    }
+    return lv_tileview_get_tile_active(s_tv) == s_face && LV_ABS(lv_obj_get_scroll_x(s_tv)) < SWIPE_PX;
+}
+
+static bool touch_talk_place_ok(void)
+{
+    if (muse_state_asleep() || muse_menu_is_open()) {
+        return false;
+    }
+    if (!face_settled()) {
+        return false;
+    }
+    if (s_pair && !lv_obj_has_flag(s_pair, LV_OBJ_FLAG_HIDDEN)) {
+        return false;
+    }
+    if (s_image && !lv_obj_has_flag(s_image, LV_OBJ_FLAG_HIDDEN)) {
+        return false;
+    }
+    return true;
+}
+
+/* Called every UI frame, including the ones that skip drawing. */
+static void touch_hold_tick(void)
+{
+    if (!s_indev) {
+        return;
+    }
+    bool raw = lv_indev_get_state(s_indev) == LV_INDEV_STATE_PRESSED;
+    lv_point_t p;
+    lv_indev_get_point(s_indev, &p);
+    if (raw) {
+        s_hold_raw_at = lv_tick_get();
+    }
+    /* Keep a press across one missed sample. Only a real sample may start talk. */
+    bool down = raw || (s_hold_down && s_hold_raw_at && lv_tick_elaps(s_hold_raw_at) < HOLD_GAP_MS);
+
+    if (s_hold_talking && !face_settled()) {
+        muse_input_touch_edges(MUSE_BTN_TALK_RELEASE);
+        s_hold_talking = false;
+        s_hold_track = false;
+    }
+
+    if (down && !s_hold_down) {
+        s_hold_track = touch_talk_place_ok();
+        s_hold_moved = false;
+        s_hold_talking = false;
+        s_hold_settled = false;
+        s_hold_origin = s_hold_point = p;
+        s_hold_at = lv_tick_get();
+        if (s_hold_track && s_speaker) {
+            lv_point_t at = p;
+            if (obj_within(lv_indev_search_obj(lv_screen_active(), &at), s_speaker)) {
+                s_hold_track = false;
+            }
+        }
+    } else if (down && s_hold_track && !s_hold_talking) {
+        uint32_t held = lv_tick_elaps(s_hold_at);
+        if (!s_hold_settled) {
+            s_hold_origin = p;
+            if (held >= HOLD_SETTLE_MS) {
+                s_hold_settled = true;
+            }
+        } else if (LV_ABS(p.x - s_hold_origin.x) > HOLD_MOVE_PX || LV_ABS(p.y - s_hold_origin.y) > HOLD_MOVE_PX
+                   || !face_settled()) {
+            s_hold_moved = true;
+        }
+        s_hold_point = p;
+        if (!s_hold_moved && raw && held >= HOLD_TALK_MS) {
+            s_hold_talking = true;
+            muse_input_touch_edges(MUSE_BTN_TALK_PRESS);
+        }
+    } else if (!down && s_hold_down) {
+        if (s_hold_talking) {
+            muse_input_touch_edges(MUSE_BTN_TALK_RELEASE);
+            s_hold_talking = false;
+        } else if (s_hold_track && lv_tick_elaps(s_pet_at) >= 80
+                   && lv_tick_elaps(s_hold_at) < HOLD_TALK_MS
+                   && LV_ABS(s_hold_point.x - s_hold_origin.x) < TAP_MOVE_PX
+                   && LV_ABS(s_hold_point.y - s_hold_origin.y) < TAP_MOVE_PX) {
+            /* LVGL drops the canvas click when the finger jitters. Pet here. */
+            s_pet_at = lv_tick_get();
+            muse_state_make_happy();
+        }
+    }
+    s_hold_down = down;
+}
+
 static void on_canvas_clicked(lv_event_t *e)
 {
     (void)e;
+    if (s_hold_talking) {
+        return;
+    }
+    s_pet_at = lv_tick_get();
     muse_state_make_happy();
 }
 
@@ -1439,6 +1568,7 @@ static void frame_tick(lv_timer_t *timer)
         send_snapshot();
     }
     (void)timer;
+    touch_hold_tick();
     image_sync();
     float mode_t;
     muse_mode_t mode = muse_state_mode(&mode_t);
@@ -1517,6 +1647,11 @@ esp_err_t muse_ui_start(void)
     if (!disp) {
         ESP_LOGE(TAG, "display init failed");
         return ESP_FAIL;
+    }
+    /* The tile view starts sliding at the default 10 px. That is inside a
+     * still hold, and any slide used to cancel talk. Let a hold win. */
+    if (s_indev) {
+        lv_indev_set_scroll_limit(s_indev, SWIPE_PX);
     }
 
     s_image_mutex = xSemaphoreCreateMutex();

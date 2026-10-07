@@ -389,6 +389,13 @@ static bool update_wifi_nap(TickType_t now, bool paused)
     return napping;
 }
 
+static uint32_t s_touch_edges;
+
+void muse_input_touch_edges(unsigned edges)
+{
+    __atomic_fetch_or(&s_touch_edges, edges, __ATOMIC_SEQ_CST);
+}
+
 static void input_task(void *arg)
 {
     (void)arg;
@@ -398,7 +405,8 @@ static void input_task(void *arg)
     TickType_t powered = xTaskGetTickCount() - pdMS_TO_TICKS(POWER_MS);
 
     for (;;) {
-        unsigned ev = muse_board->poll_buttons();
+        unsigned touch = __atomic_exchange_n(&s_touch_edges, 0, __ATOMIC_SEQ_CST);
+        unsigned ev = muse_board->poll_buttons() | touch;
         if (ev & (MUSE_BTN_TALK_PRESS | MUSE_BTN_TALK_RELEASE)) {
             ESP_LOGI(TAG, "talk key:%s%s", ev & MUSE_BTN_TALK_PRESS ? " press" : "",
                      ev & MUSE_BTN_TALK_RELEASE ? " release" : "");
