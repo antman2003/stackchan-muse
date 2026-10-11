@@ -178,4 +178,66 @@ when it worked. Meta's own position, from `@anantn` on
 
 Native voice may come back. Until then, DIY is the sanctioned route.
 
+## Current voice-note and barge-in source findings
+
+Read-only source investigation, 2026-10-11. This is the current Hatch hold-to-talk path on CoreS3. It is not a future design.
+
+### Duration
+
+**SOURCE-CONFIRMED.** Local capture is not an 8-second limit.
+
+`muse_voice.c` `record` stops on release or at `MAX_SECS` (15). `MAX_FRAMES` is `MUSE_AUDIO_RATE * 15`. `MUSE_AUDIO_RATE` is 16000. A short tail (`TAIL_FRAMES`, 120 ms) is kept after release.
+
+**SOURCE-CONFIRMED.** The exact 8-second constant is backlog, not utterance length.
+
+`muse_chat_session.cpp` sets `IN_BYTES` to `MIC_RATE * 2 * 8`. At 16 kHz mono s16 that is `16000 × 1 × 2 × 8 = 256000` bytes. When that stream buffer fills, live queued audio can be dropped (`mic backlog full`). Recording does not stop. The kept note is still sent from `s_rec`.
+
+**SOURCE-CONFIRMED** client cap, **UNKNOWN** server cap. `NOTE_MAX_BYTES` is `MIC_RATE * 2 * 20` (640000 bytes, 20 seconds of the same format). The recorder hits 15 seconds first. A comment in that file says Muse stops at 15 seconds. That server behavior is not independently verified.
+
+Neither 8 seconds nor 15 seconds is a product requirement. 15 seconds is the current local implementation cap.
+
+### Upload
+
+**SOURCE-CONFIRMED.** The connected Hatch path is hybrid: it streams while the user holds.
+
+Press opens the note (`open_note`, `POST /chat/stream`). PCM is recorded and sent in base64 WAV chunks during the hold (`record_note` / `send_note_part`). Release sends the final chunk, then the client waits for the reply. This is not "record the whole note, then start the upload."
+
+If Hatch is not reachable, the note can stay in PSRAM (`HOLD_NOTES` / `s_rec`) and be sent later.
+
+### Format
+
+**SOURCE-CONFIRMED.** 16 kHz, mono note, signed 16-bit PCM, WAV wrapper, base64 on the wire. Samples are not compressed before upload. Base64 expands the body by 4/3. `NOTE_PART_BYTES` is 6144 PCM bytes so one part's base64 fits a body chunk.
+
+Capture is opened as stereo and mixed to mono (`mic_slot` is `-1` on CoreS3). The stored note is mono.
+
+### Microphone during playback
+
+**SOURCE-CONFIRMED** for the conversation loop. `hatch_reply` writes the speaker and does not read the microphone. Both devices are opened at init (`board_m5stack_cores3.c` `audio_init` asks the BSP for duplex I2S, then opens speaker and mic). That init does not mean the talk loop captures during playback. `muse_audio_loopback_test` alternates read and write; it is a test, not the conversation path. Whether the BSP can sustain simultaneous read and write beyond that test is **UNKNOWN**. The BSP source is not in this tree.
+
+### AEC and VAD
+
+**NOT FOUND** on the current CoreS3 product path (`muse_audio`, `muse_voice`, `muse_chat_session`). No acoustic echo cancellation, no VAD in the Muse conversation path, and no speaker reference fed into capture.
+
+`esp32/main/voice_board.c` mentions XMOS AEC stages. That file is a different board, not CoreS3.
+
+**REFERENCE-CONFIRMED, not integrated.** `references/xiaozhi-esp32/main/audio/engines/afe_audio_engine.cc` configures ESP-SR AFE with `aec_init`, `AEC_MODE_FD_LOW_COST`, and `vad_init`.
+
+### Playback cancel
+
+**SOURCE-CONFIRMED, partial.** A new press during reply playback calls `muse_hatch_turn_cancel`, drains the software queue `s_out`, and stops further writes. A new recording can then start. There is no `muse_speak_cancel` and no explicit codec or DMA flush. Audio already in the DMA can still play a short tail. After that interrupt, `record` discards about 200 ms of microphone (`SETTLE_CHUNKS`) so the reply tail is not the start of the next note.
+
+**REFERENCE-ONLY.** `references/Muse-charm-mosaico/projects/muse_companion/main/companion_tts.c` `companion_tts_cancel` drops a generation so its worker stops writing. That design is not in this firmware.
+
+### What this means for later conversation work
+
+**SOURCE-CONFIRMED** implication, not a new subsystem. Continuous conversation can stay a series of bounded turns. The client already streams each turn while it is recorded. Voice barge-in does not require a permanent realtime microphone to the Muse cloud.
+
+What the current path does not do, and Phase 3 still needs if barge-in is voice rather than a button:
+
+- microphone capture while playback is active
+- a way to tell user speech from the speaker (AEC, playback-aware VAD, or an equivalent)
+- a cancel that stops `muse_speak` and the DMA tail, not only `s_out`
+
+A press during playback already abandons the turn. That is manual interruption, not speech detection.
+
 
