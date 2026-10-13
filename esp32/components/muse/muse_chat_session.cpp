@@ -69,6 +69,7 @@ extern "C" {
 #include "muse_account_api.h"
 #include "muse_link.h"
 #include "muse_settings.h"
+#include "muse_latency.h"
 #include "muse_speak.h"
 #include "muse_wifi.h"
 }
@@ -969,6 +970,7 @@ static void turn_fail(const char *why)
         muse_hatch_console("error", why, nullptr);
     }
     emit(MUSE_HATCH_EV_ERROR, why);
+    muse_latency_finish("failed");
     turn_finish();
 }
 
@@ -980,6 +982,7 @@ static void turn_done(bool complete)
                            complete ? "true" : "false");
     }
     emit(MUSE_HATCH_EV_DONE, nullptr);
+    muse_latency_finish(complete ? "ended" : "incomplete");
     turn_finish();
 }
 
@@ -1158,6 +1161,8 @@ static bool record_note(void)
     if (!send_note_part(true)) {
         return false;
     }
+    /* T1: the note body is closed. open_note at press is earlier and is not T1. */
+    muse_latency_mark(M1_T1, "final_input_submitted");
     ESP_LOGI(TAG, "voice note: %.2fs, %u byte request", secs, (unsigned)s_turn.body_sent);
     mark(M_SENT);
     s_turn.chat_posted = true;
@@ -1458,6 +1463,8 @@ static void on_event(cJSON *line)
             muse_hatch_console("text", text, "\"msg\":%d", i);
         } else if (text && text[0]) {
             mark(M_TEXT);
+            /* T2: first assistant text. The chat ack is only the user-message id. */
+            muse_latency_mark(M1_T2, "first_response");
             append_text(m, text);
             show_reply_start(m);   /* ignored once the speech starts */
         }
@@ -1468,7 +1475,14 @@ static void on_event(cJSON *line)
         }
         cJSON *ready = cJSON_GetObjectItem(payload, "display_text_ready");
         if (done || !cJSON_IsFalse(ready)) {
+            if ((text && text[0]) || m.len) {
+                muse_latency_mark(M1_T2, "first_response");
+            }
             message_done(i, text);
+            if (m.done) {
+                /* T3: first assistant message is complete, which is the text TTS uses. */
+                muse_latency_mark(M1_T3, "reply_text_complete");
+            }
         }
     }
 }
@@ -1521,6 +1535,10 @@ static void start_tts(void)
          * and finishes the message once it's drained.
          */
         const char *said = s_turn.texts ? s_turn.texts + i * TEXT_MAX : nullptr;
+        if (said && said[0]) {
+            /* T4 is the request, before xiaole mapping and synthesis inside begin. */
+            muse_latency_mark(M1_T4, "tts_requested");
+        }
         if (said && said[0] && muse_speak_begin(said)) {
             m.pcm_start = s_turn.pcm_out;
             m.pcm_frames = 0;
@@ -1594,6 +1612,9 @@ static void speak_onboard(void)
     msg_t &m = s_turn.msgs[s_turn.tts_msg];
     while (xStreamBufferSpacesAvailable(s_out) >= 512 * sizeof(int16_t)) {
         int n = muse_speak_take(s_pcm16, 512);
+        if (n > 0) {
+            muse_latency_mark(M1_T5, "first_pcm");
+        }
         if (n <= 0) {
             m.pcm_frames = s_turn.pcm_out - m.pcm_start;
             m.tts = TTS_FINISHED;
@@ -2104,6 +2125,7 @@ extern "C" bool muse_hatch_ready(void)
 extern "C" void muse_hatch_turn_begin(void)
 {
     uint32_t gen = ++s_gen;
+    muse_latency_arm(gen);
     xStreamBufferReset(s_in);
     drain_out();
     post(CMD_BEGIN, gen);

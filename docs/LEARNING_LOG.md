@@ -639,3 +639,189 @@ Whether an explicit codec close, abort, or silence flush can cut that tail, and 
 ### Related milestone / decision
 
 ADR-016. Phase 3. Not started.
+
+## 2026-10-11 — M1 one-turn latency trace
+
+Evidence level: MEASURED
+
+### Question
+
+Where does one current Chinese hold-to-talk turn spend time from release to the first playback write?
+
+### What I learned
+
+One turn, `turn=1`, status `complete`. The note was 6.74 s. Deltas are milliseconds after T0.
+
+| Mark | Hook | ms after T0 |
+|---|---|---|
+| T0 `end_speech` | `muse_voice.c` `record`, on `MUSE_PTT_UP` | 0.0 |
+| T1 `final_input_submitted` | `muse_chat_session.cpp` `record_note`, after `send_note_part(true)` | 149.5 |
+| T2 `first_response` | `on_event`, first assistant `delta.text_append` | 34096.9 |
+| T3 `reply_text_complete` | `on_event`, first `delta.message_done` | 35157.6 |
+| T4 `tts_requested` | `start_tts`, immediately before `muse_speak_begin` | 35161.9 |
+| T5 `first_pcm` | `speak_onboard`, first `muse_speak_take` with samples | 35251.4 |
+| T6 `playback_submit` | `muse_voice.c` `hatch_reply`, before the first non-silent `muse_audio_write` | 35252.7 |
+| T7_PROXY `playback_write_done` | same write returning `ESP_OK` | 35253.1 |
+
+T1 is the final voice-note body close after release. `open_note` at press is earlier and is not T1. The tail after release was logged separately at +120.1 ms and is not T0.
+
+`T7_PROXY` is the codec accepting the first non-silent buffer. It is not measured speaker onset.
+
+Gaps: T0–T1 149.5, T1–T2 33947.3, T2–T3 1060.7, T3–T4 4.3, T4–T5 89.4, T5–T6 1.2, T6–T7_PROXY 0.3.
+
+On this single trace, almost all of the time is T1–T2, waiting for the first assistant text. Local TTS and playback handoff after the text is complete are under 100 ms. That is one turn, not a tuning result.
+
+### Evidence
+
+Serial log from the CoreS3 after an app-only flash at `0x20000`. Wi-Fi stayed up and the existing Muse session answered. Xiaole parsed and spoke the Chinese reply. A short tap was not part of this test.
+
+### Engineering intuition
+
+The clock that matters for this path starts when the finger lifts, and the long wait starts after the note is closed.
+
+### Why it matters to this project
+
+M2 can record more turns against this same trace shape. Nothing here says which server or network stage fills T1–T2.
+
+### Open questions
+
+What inside T1–T2 is upload, server wait, or first-token delay. True audible onset versus `T7_PROXY`.
+
+### Related milestone / decision
+
+M1 passed. M2 not started.
+
+## 2026-10-11 — M2 baseline latency set
+
+Evidence level: MEASURED
+
+### Question
+
+Is the M1 gap of about 33.9 seconds from final upload to first reply text the usual case?
+
+### What I learned
+
+Five complete Chinese turns and one English turn, same robot, saved Wi-Fi, existing Muse session. Times are milliseconds after T0. Total is T0 to `T7_PROXY` for spoken turns.
+
+| Turn | Lang | Input s | T0–T1 | T1–T2 | T2–T3 | T3–T4 | T4–T5 | T5–T6 | Total |
+|---|---|---|---|---|---|---|---|---|---|
+| C1 | zh | 2.86 | 827.0 | 25421.8 | 846.3 | 3.8 | 43.0 | 1.5 | 27144.1 |
+| C2 | zh | 3.04 | 162.0 | 18568.7 | 724.7 | 1.1 | 24.5 | 1.2 | 19482.9 |
+| C3 | zh | 2.66 | 164.2 | 17478.7 | 1058.4 | 0.7 | 29.6 | 1.2 | 18733.6 |
+| C4 | zh | 2.62 | 155.1 | 18735.2 | 1036.1 | 3.7 | 27.9 | 1.2 | 19959.9 |
+| C5 | zh | 2.92 | 137.2 | 14736.7 | 557.5 | 4.3 | 28.4 | 1.2 | 15466.0 |
+| E1 | en | 4.24 | 176.3 | 12860.6 | 408.0 | 4.2 | — | — | — |
+
+Chinese T1–T2: min 14736.7, median 18568.7, max 25421.8. Mean 18988.2.
+
+Chinese total: min 15466.0, median 19482.9, max 27144.1. Mean 20157.3.
+
+The M1 value of 33947 ms is higher than every Chinese T1–T2 in this set. The gap is still the dominant one on every turn, including English, and it stays in a band of about 13 to 25 seconds here. It is not a single first-turn accident, and it is not gone after warm-up.
+
+C1 was the slowest Chinese turn. The log shows a second VM connect during that press, and T0–T1 was 827 ms instead of about 140–180 ms. C5 was the first turn after another boot and had the fastest Chinese T1–T2, with only the boot-time connect. A first turn is not always the slowest.
+
+English was shown, not spoken. The log says `showing message` and the summary is `ended`. T5, T6, and `T7_PROXY` are absent. T4 was still emitted because the trace marks the call immediately before `muse_speak_begin`, and that call returned without starting xiaole. Those three playback marks were not invented.
+
+Two other presses are excluded. One Chinese note reached T4 and then the log shows `RTC_SW_CPU_RST` before any PCM. One later note was still waiting when a new serial capture reset the USB port. Neither is in the five.
+
+### Evidence
+
+Serial captures after the M1 app-only flash. Wi-Fi came back after each reset and the Muse session connected. Chinese turns log `speaking message` and xiaole playback. After the English summary, heartbeats continue and there is no new press-to-talk. The short tap does not write a log line. The tap did not start a recording. The face change itself is not in the serial log.
+
+### Engineering intuition
+
+The long wait is after the note is closed and before the first reply text. Speech synthesis is not where this baseline spends its time.
+
+### Why it matters to this project
+
+M3 can compare a new speech path against a baseline whose dominant gap is T1–T2, not T4–T5. One trace at 33.9 seconds overstated the center of this set and understated how steady the multi-second wait is.
+
+### Open questions
+
+What inside T1–T2 is still on the device, and what is the server. Why the CPU reset happened after T4 on the excluded turn.
+
+### Related milestone / decision
+
+M2 passed. M3 not started.
+
+## 2026-10-12 — M2 follow-up, residual first-text latency
+
+Evidence level: MEASURED. Transcription cost: UNKNOWN on every turn. A model change in the middle is USER-OBSERVED; the device log does not name a model.
+
+### Question
+
+After the server-side latency change, how much T1–T2 remains, and does that remainder have fast and slow modes, a session-age trend, or a reconnect penalty?
+
+### Setup
+
+Same firmware and M1 marks. Same short Chinese prompt, “一加一等于几？”, hold-to-talk, about 1.8–4.8 s of speech. No intentional reboot. Opening the serial port reset the chip once before the first turn. A later double exception during xiaole parsing rebooted the chip again. The English control was not collected. No firmware, protocol, TTS, or UI change.
+
+The voice-note path does not log a transcript or a transcription-cost class. There is no `heard:` line in this capture. Residual latency was not computed. Turns that need a class are marked UNKNOWN.
+
+### What I learned
+
+Twelve Chinese turns have a complete T1–T2. One press is excluded: it reached T2 about 10.1 s after T1, then panicked during speech parsing (`RTC_SW_CPU_RST`) before a summary. Three later presses arrived after this set was closed. All were spoken, with no reconnect, and none are in the statistics below. Their speech and T1–T2 times were 2.56 s / 7.929 s, 3.74 s / 10.182 s, and 2.50 s / 3.699 s.
+
+One turn reconnected during the press (connect about 1.8 s). It is not in the warm-session numbers. Its T1–T2 was 15.519 s.
+
+Warm-session T1–T2, n=11, seconds: min 2.437, median 6.280, max 44.804, mean 10.168, sample standard deviation 12.127. The mean and deviation are pulled by the 44.804 s turn. No-transcription count is 0, so that subset has no min, median, max, mean, or deviation.
+
+T1–T2 at or below 3 s: 2 of 11 warm turns. Above 5 s: 7 of 11. The warm values run 2.4, 2.8, 3.1, 4.6, 5.7, 6.3, 7.3, 7.5, 12.8, 14.5, then 44.8 s. No empty gap separates a fast mode from a slow mode.
+
+Order does not show a steady session-age slope. The first turn of the first boot was 14.5 s and the next was 6.3 s. After the crash, the reconnect turn was 15.5 s, then 12.8 s, then 44.8 s. Later turns were mixed.
+
+Six turns in the middle showed 2–4 characters and did not speak. Their T1–T2 values were 2.437, 7.454, 3.135, 4.616, 5.684, and 2.795 s (median 3.875, mean 4.353). The turns before and after that stretch spoke longer replies, including a 242-character reply at 7.309 s after the short stretch. Shorter answers match a quicker spoken turn only because xiaole did not run. They do not pin first-text time to one value.
+
+### Evidence
+
+Serial capture on the existing M1 firmware. Summaries `complete` when xiaole spoke, `ended` when the reply was shown and not spoken. Reconnect is the one `connected to VM` line during a press. No transcription event was logged.
+
+### Engineering intuition
+
+Same prompt, same client, and a closed voice note still leave a multi-second spread before the first text. That spread is consistent with serving, queue, or model time-to-first-token variance. Those are hypotheses. This log does not show which one.
+
+### Why it matters to this project
+
+M3 still does not explain T1–T2. A shorter reply can make the spoken turn feel faster without moving the first-text wait onto a stable fast path.
+
+### Open questions
+
+Per-turn transcription cost, server queue time, model identity, and why one warm turn took 44.8 s.
+
+### Related milestone / decision
+
+M2 remains PASSED. M3 not started. No architecture decision changed.
+
+## 2026-10-13 — Latency investigation closeout
+
+Evidence level: MEASURED, plus Muse-side transcription costs supplied as operator knowledge (0 s when not needed, about 2 s when a fallback runs). The device log still does not label transcription per turn.
+
+### Question
+
+Where does the remaining first-text wait sit, and is more client latency work justified before M3?
+
+### What I learned
+
+M1 added T0–T7 on the existing chat turn. T7 in firmware is `T7_PROXY`: the codec accepting the first non-silent write. It is not physical audible onset.
+
+M2, before the Muse-side change, measured Chinese T1→T2 at a median of about 18.6 s (min 14.7 s, max 25.4 s) and release-to-playback-proxy at a median of about 19.5 s. English T1→T2 was about 12.9 s, and that reply was shown rather than spoken.
+
+A Muse VM change removed unnecessary re-transcription. Transcription is about 0 s when it is not needed and about 2 s when the fallback runs. After that change, warm Chinese first-text times were no longer stuck near 19 s. A later warm set ran from 2.4 s to 14.5 s with one 44.8 s outlier (median 6.3 s). That outlier’s chat acknowledgement arrived about 0.4 s after T1. The client then waited about 44 s for the first text. No reconnect, retry, or local stall explained it.
+
+A typed-versus-voice test used the same short question. Warm typed turns, after the server acknowledgement, completed a one-character reply in a band of about 3.2–5.0 s (median 3.56 s). Warm voice ack→first-text had median 5.69 s. About half of the voice turns sat in the same ~3 s band as typed text. The other half ran about 7–15 s. One accepted voice note produced no reply before the 60 s client timeout.
+
+After T1, local work is the 2 ms poll and one JSON line: tens of milliseconds. Subscribe is already open before the user speaks. The voice-note body sends an empty `message`, `output_modality: "text"`, and the WAV. There is no model, reasoning, tool, or fast-mode field. Typed and voice share a ~3 s floor after accept. The voice long tail is larger than the known 0–2 s transcription cost, and the client cannot see the server stage that fills it.
+
+The Muse-side VM change materially shortened the old ~19 s median. The remaining serving tail is outside current client visibility. Further client latency optimization is not justified until the server path changes.
+
+### Why it matters to this project
+
+M3 can evaluate speech quality, bilingual speech, and cancelability. It should not be treated as the fix for the multi-second first-text tail. Xiaole is still the temporary speaker. It is not the dominant latency.
+
+### Open questions
+
+Which server stage fills the post-accept floor and the voice-only tail. No client field currently selects a simpler turn.
+
+### Related milestone / decision
+
+M1 PASSED. M2 PASSED. Latency follow-up COMPLETE. M3 is ready to start and has not started. No architecture decision changed.

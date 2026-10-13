@@ -8,17 +8,23 @@ Conversation UX Foundation
 
 ## Current milestone
 
-**NOT STARTED**
+**READY TO START**
 
-M1 — Latency instrumentation
+M3 — TTS architecture evaluation
 
-The architecture review is closed. M1 has not started. No latency instrumentation has been added.
+M1 — PASSED. T0–T7 are on the existing chat turn. T7 in firmware is a playback-write proxy, not physical audible onset.
+
+M2 — PASSED. The pre-change Chinese T1→T2 median was about 18.6 s. After the Muse VM transcription change, first text is often a few seconds and still has a long tail.
+
+Latency follow-up — COMPLETE. Client work after the note is closed is tens of milliseconds. The remaining multi-second wait is server-side from the client’s perspective. Further client latency optimization is paused. The pause is because that wait is outside current client control, not because the latency target is already met.
+
+M3 implementation has not started. Xiaole is still the temporary speaker.
 
 ## Overall status
 
-READY FOR M1
+READY FOR M3
 
-Not in implementation.
+M3 has not started.
 
 ## Last known-good product commit
 
@@ -58,7 +64,7 @@ These behaviors are the known-good checklist. "Working" here means the behavior 
 ## Active architecture questions
 
 - What architecture should replace the current xiaole TTS prototype?
-- Where is the current 10+ second response latency spent?
+- Which server stage fills the post-accept first-text floor and the voice-note long tail? Client polling, the JSON parser, and xiaole are not that wait. Further client latency work is deferred.
 - What should the safe motion API look like?
 - Which demonstrated StackChan + Muse implementation should be the sound-source-localization reference?
 
@@ -205,11 +211,11 @@ Recorded as ADR-017. Hearing an interruption and cancelling the action remain se
 
 ## Next action
 
-Start M1 latency instrumentation after this documentation checkpoint.
+Start M3 — TTS architecture evaluation when asked. Implementation has not started. Latency optimization stays paused.
 
 ## Blockers
 
-None. The architecture review is closed. M1 has not started. The baseline is not broken.
+None.
 
 ## Regression baseline
 
@@ -223,4 +229,4 @@ None. The architecture review is closed. M1 has not started. The baseline is not
 
 ## Last updated
 
-2026-10-11. Architecture review closed from the voice-note source read. Firmware baseline is still `93a2b7a0adad7eb96df5cca5b9aef56a9f1a4b5a`.
+2026-10-13. M1 PASSED. M2 PASSED. Latency follow-up COMPLETE. Current milestone is M3, status READY TO START. M3 implementation has not started.

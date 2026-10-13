@@ -30,6 +30,7 @@
 
 #include "muse_adpcm.h"
 #include "muse_audio.h"
+#include "muse_latency.h"
 #include "muse_board.h"
 #include "muse_chat.h"
 #include "muse_input.h"
@@ -318,9 +319,15 @@ static bool record(bool barge_in, size_t *held, char *why, size_t cap)
          */
         if (!released && got_event(MUSE_PTT_UP)) {
             released = true;
+            /* T0 is this release, not the tail and not the later upload. */
+            muse_latency_mark(M1_T0, "end_speech");
             stop_at = n + TAIL_FRAMES < MAX_FRAMES ? n + TAIL_FRAMES : MAX_FRAMES;
         }
     }
+    if (!released) {
+        muse_latency_mark(M1_T0, "end_speech");
+    }
+    muse_latency_note("tail_captured");
     muse_state_set_level(0);
     *held = n - pre;
 
@@ -393,6 +400,7 @@ static bool hatch_reply(bool *delivered)
         }
         if (got_event(MUSE_PTT_DOWN)) {
             ESP_LOGI(TAG, "reply interrupted");
+            muse_latency_finish("cancelled");
             muse_hatch_turn_cancel();
             muse_state_set_level(0);
             return true;
@@ -405,7 +413,23 @@ static bool hatch_reply(bool *delivered)
                 ESP_LOGI(TAG, "reply audio after %.2fs", (esp_timer_get_time() - t0) / 1e6);
             }
             muse_state_set_level(muse_audio_level(buf, n));
-            muse_audio_write(buf, n);
+            /* T6/T7_PROXY: first non-silent reply chunk into the codec. Silence
+             * between messages, below, is not this handoff. T7_PROXY is the
+             * write returning, not speaker onset. */
+            bool audible = false;
+            for (size_t i = 0; i < n; i++) {
+                if (buf[i]) {
+                    audible = true;
+                    break;
+                }
+            }
+            if (audible) {
+                muse_latency_mark(M1_T6, "playback_submit");
+            }
+            esp_err_t wrote = muse_audio_write(buf, n);
+            if (audible && wrote == ESP_OK) {
+                muse_latency_mark(M1_T7_PROXY, "playback_write_done");
+            }
             played += n;
         } else if (done) {
             break;
